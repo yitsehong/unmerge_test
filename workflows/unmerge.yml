@@ -1,0 +1,87 @@
+name: Find unmerged prefixed branches
+
+on:
+  workflow_dispatch:
+    inputs:
+      prefix:
+        description: "Branch prefix (e.g. feature/)"
+        required: true
+        default: "feature/"
+      base:
+        description: "Base branch to compare against"
+        required: true
+        default: "develop"
+      fail_if_found:
+        description: "Fail the workflow if unmerged branches exist"
+        required: true
+        default: "false"
+  # Uncomment if you want it to run daily
+  # schedule:
+  #   - cron: "0 2 * * *"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # important for merge detection
+
+      - name: Find branches with prefix not merged into base
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PREFIX="${{ inputs.prefix }}"
+          BASE="${{ inputs.base }}"
+          FAIL="${{ inputs.fail_if_found }}"
+
+          echo "Prefix: $PREFIX"
+          echo "Base:   $BASE"
+          echo
+
+          git fetch --all --prune
+          git checkout -q "origin/${BASE}"
+
+          # List remote branches matching prefix (excluding HEAD pointer)
+          mapfile -t BRANCHES < <(
+            git for-each-ref --format='%(refname:short)' refs/remotes/origin \
+              | sed 's#^origin/##' \
+              | grep -vE '^(HEAD|'"${BASE}"')$' \
+              | grep -E "^${PREFIX}"
+          )
+
+          if [ "${#BRANCHES[@]}" -eq 0 ]; then
+            echo "No branches found with prefix '${PREFIX}'."
+            exit 0
+          fi
+
+          echo "Branches with prefix '${PREFIX}':"
+          printf ' - %s\n' "${BRANCHES[@]}"
+          echo
+
+          UNMERGED=()
+          for b in "${BRANCHES[@]}"; do
+            # Is the branch tip already reachable from develop?
+            # If yes => merged. If no => not merged.
+            if git merge-base --is-ancestor "origin/${b}" "origin/${BASE}"; then
+              echo "MERGED   : ${b}"
+            else
+              echo "UNMERGED : ${b}"
+              UNMERGED+=("${b}")
+            fi
+          done
+
+          echo
+          if [ "${#UNMERGED[@]}" -eq 0 ]; then
+            echo "✅ All prefixed branches are merged into ${BASE}."
+            exit 0
+          fi
+
+          echo "❌ Unmerged branches into ${BASE}:"
+          printf ' - %s\n' "${UNMERGED[@]}"
+
+          if [ "${FAIL}" = "true" ]; then
+            exit 1
+          fi
+
